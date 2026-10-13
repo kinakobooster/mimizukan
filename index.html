@@ -42,7 +42,9 @@ button.danger{color:#ff7b7b}
 .key{position:absolute;top:0;display:flex;align-items:flex-end;justify-content:center;user-select:none;-webkit-user-select:none;touch-action:pan-x}
 .key.white{width:46px;height:100%;background:var(--white);border:1px solid #c9c4b8;border-radius:0 0 6px 6px;color:#3a3a3a;z-index:1;padding-bottom:12px}
 .key.black{width:30px;height:60%;background:var(--black);border:1px solid #000;border-radius:0 0 5px 5px;color:#ddd;z-index:2;padding-bottom:8px}
-.key .lbl{font-size:14px;font-weight:600;line-height:1}
+.key .lbl{font-size:14px;font-weight:600;line-height:1;white-space:nowrap}
+.key .lbl .oct{font-size:11px;color:#c0392b;margin-left:1px}
+.key.black .lbl .oct{color:#ff9f8a}
 .key.black .lbl{font-size:12px}
 .key .sub{position:absolute;top:6px;font-size:10px;color:#999;font-weight:400}
 .key.tonic.white{background:#ffe6b3}
@@ -139,6 +141,8 @@ const LOW = 48, HIGH = 95;          // C3..B6
 const WHITE_W = 46, BLACK_W = 30;
 const BEAT = 0.38;
 const SWIPE_PX = 36;
+const UP = '↑', DOWN = '↓';   // オクターブ記号（基準のド〜シは無印）
+const UP_CHARS = new Set(['↑','^','＾']), DOWN_CHARS = new Set(['↓','_','＿']);
 const LS_SONGS = 'mimizukan.songs', LS_LAST = 'mimizukan.last';
 
 const $ = id => document.getElementById(id);
@@ -222,7 +226,10 @@ function buildPiano(){
   relabel();
 }
 function degreeOf(m){ return m % 12; }   // 鍵盤は常に C＝ド の並び
-function labelFor(m){ return transposed() ? SOLF[degreeOf(m)] : NOTE[m%12]; }
+function octOf(m){ return Math.floor(m / 12) - 5; }           // 60..71 → 0, 72..83 → 1, 48..59 → -1
+function octMark(o){ return o > 0 ? UP.repeat(o) : o < 0 ? DOWN.repeat(-o) : ''; }
+function solfOf(m){ return SOLF[m % 12] + octMark(octOf(m)); }
+function labelFor(m){ return transposed() ? solfOf(m) : NOTE[m%12]; }
 function relabel(){
   for (const el of piano.children) {
     const m = +el.dataset.midi, pc = m % 12;
@@ -232,7 +239,8 @@ function relabel(){
       lbl.textContent = BLACK.has(pc) ? '' : NOTE[pc] + (pc === 0 ? Math.floor(m/12)-1 : '');
       sub.textContent = '';
     } else {
-      lbl.textContent = SOLF[pc];
+      lbl.innerHTML = SOLF[pc] + (octOf(m) ? '<span class="oct"></span>' : '');
+      if (octOf(m)) lbl.querySelector('.oct').textContent = octMark(octOf(m));
       sub.textContent = BLACK.has(pc) ? '' : NOTE[((pc + shift()) % 12 + 12) % 12];  // 実際に鳴る音
       if (pc === 0) el.classList.add('tonic');
     }
@@ -276,7 +284,7 @@ piano.addEventListener('contextmenu', e => e.preventDefault());
 function onSwipeDown(midi){
   if (navigator.vibrate) navigator.vibrate(12);
   if (mode === 'key' || tonicPc == null) { setKey(midi); return; }
-  insertText(SOLF[degreeOf(midi)]);
+  insertText(solfOf(midi));
 }
 
 // ---------- キー ----------
@@ -292,7 +300,7 @@ function updateKeyUI(){
   else { keyBtn.textContent = 'キー ' + NOTE[tonicPc]; keyBtn.classList.remove('unset'); }
   hintEl.classList.toggle('keymode', mode === 'key');
   if (mode === 'key') hintEl.textContent = '① 曲の終わりの音を想像して鍵盤で探す → 見つけたら、その鍵盤を下にスワイプ';
-  else hintEl.textContent = `ド＝${NOTE[tonicPc]} に移調中。鍵盤を下にスワイプで追加、押している間は鳴り続けます`;
+  else hintEl.textContent = `ド＝${NOTE[tonicPc]} に移調中。下にスワイプで追加。ド〜シは無印、上のオクターブは↑、下は↓`;
 }
 keyBtn.addEventListener('click', () => {
   if (mode === 'key' && tonicPc != null) mode = 'melody';
@@ -311,9 +319,14 @@ function backspace(){
   const s = ta.selectionStart, e = ta.selectionEnd;
   if (s !== e) ta.setRangeText('', s, e, 'end');
   else if (s > 0) {
-    let n = 1; const p = ta.value[s-1];
-    if ((p === 'ァ' || p === 'ィ') && ta.value[s-2] === 'フ') n = 2;
-    ta.setRangeText('', s-n, s, 'end');
+    let i = s;
+    while (i > 0 && (UP_CHARS.has(ta.value[i-1]) || DOWN_CHARS.has(ta.value[i-1]))) i--;   // 記号をまとめて
+    if (i === s || i > 0) {
+      const p = ta.value[i-1];
+      if ((p === 'ァ' || p === 'ィ') && ta.value[i-2] === 'フ') i -= 2;
+      else if (i > 0) i -= 1;
+    }
+    ta.setRangeText('', i, s, 'end');
   }
   persist();
 }
@@ -328,16 +341,22 @@ function showNow(s){
 }
 function tokenize(text){
   const out = [];
+  const note = (deg, ch) => out.push({ type:'note', deg, oct:0, ch });
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (c === 'フ') {
       const n = text[i+1];
-      if (n === 'ァ' || n === 'ア') { out.push({ type:'note', deg:5, ch:'ファ' }); i++; }
-      else if (n === 'ィ' || n === 'イ') { out.push({ type:'note', deg:6, ch:'フィ' }); i++; }
+      if (n === 'ァ' || n === 'ア') { note(5, 'ファ'); i++; }
+      else if (n === 'ィ' || n === 'イ') { note(6, 'フィ'); i++; }
       continue;
     }
     const d = SOLF.indexOf(c);
-    if (d >= 0) { out.push({ type:'note', deg:d, ch:c }); continue; }
+    if (d >= 0) { note(d, c); continue; }
+    if (UP_CHARS.has(c) || DOWN_CHARS.has(c)) {   // 直前の音のオクターブ記号
+      const last = out[out.length-1];
+      if (last && last.type === 'note') { last.oct += UP_CHARS.has(c) ? 1 : -1; last.ch += UP_CHARS.has(c) ? UP : DOWN; }
+      continue;
+    }
     if (c === 'ー' || c === '〜' || c === '~' || c === '-' || c === '－') { out.push({ type:'hold' }); continue; }
     if (c === '\n') { out.push({ type:'rest', len:1.5 }); continue; }
     if (c === ' ' || c === '　' || c === '、' || c === ',' || c === '/' || c === '|' || c === '・' || c === '。') { out.push({ type:'rest', len:1 }); continue; }
@@ -350,20 +369,12 @@ function playAll(){
   if (!toks.length) { showNow('…'); return; }
   const c = audio();
   const tb = 60;   // 譜面は C＝ド で組み立て、鳴らすときに移調する
-  let prev = null, t = c.currentTime + 0.06;
+  let t = c.currentTime + 0.06;
   const events = [];
   for (const tk of toks) {
     if (tk.type === 'hold') { if (events.length) events[events.length-1].dur += BEAT; t += BEAT; continue; }
     if (tk.type === 'rest') { t += BEAT * tk.len; continue; }
-    let midi;
-    if (prev == null) { midi = tb + tk.deg; if (midi > tb + 6) midi -= 12; }
-    else {
-      const base = prev - ((prev - tb) % 12 + 12) % 12 + tk.deg;
-      let best = base, bd = Math.abs(base - prev);
-      for (const cand of [base - 12, base + 12]) { const d = Math.abs(cand - prev); if (d < bd || (d === bd && cand > best)) { best = cand; bd = d; } }
-      midi = best;
-    }
-    prev = midi;
+    const midi = tb + tk.deg + 12 * Math.max(-1, Math.min(2, tk.oct));   // 無印＝基準のオクターブ、↑↓で上下
     events.push({ midi, when: t, dur: BEAT * 0.9, ch: tk.ch });
     t += BEAT;
   }
