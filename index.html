@@ -122,7 +122,6 @@ dialog p{color:var(--mute);font-size:13px;margin:0 0 8px;line-height:1.5}
   <dialog id="dlg-menu" class="menu">
     <button id="m-export">テキストで書き出し</button>
     <button id="m-share">共有リンクをコピー</button>
-    <button id="m-transpose">ド＝Cの高さで鳴らす：オフ</button>
     <button id="m-delete" class="danger">この曲を削除</button>
     <button id="m-close" class="ghost">閉じる</button>
   </dialog>
@@ -140,7 +139,7 @@ const LOW = 48, HIGH = 95;          // C3..B6
 const WHITE_W = 46, BLACK_W = 30;
 const BEAT = 0.38;
 const SWIPE_PX = 36;
-const LS_SONGS = 'mimizukan.songs', LS_LAST = 'mimizukan.last', LS_TRANS = 'mimizukan.transpose';
+const LS_SONGS = 'mimizukan.songs', LS_LAST = 'mimizukan.last';
 
 const $ = id => document.getElementById(id);
 const screenList = $('screen-list'), screenEdit = $('screen-edit');
@@ -152,7 +151,6 @@ let songs = load(LS_SONGS, []);
 let song = null;                    // 編集中
 let mode = 'key';                   // 'key' | 'melody'
 let tonicPc = null;
-let transpose = load(LS_TRANS, false);
 
 function load(k, d){ try { const v = localStorage.getItem(k); return v==null ? d : JSON.parse(v); } catch(e){ return d; } }
 function save(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
@@ -168,10 +166,10 @@ function audio(){
   return ctx;
 }
 function freq(m){ return 440 * Math.pow(2, (m-69)/12); }
-function soundMidi(m){
-  if (!transpose || tonicPc == null) return m;
-  return m - (tonicPc <= 6 ? tonicPc : tonicPc - 12);
-}
+// トランスポーズ: キー決定後は C の鍵盤が「ド」になり、その調の高さで鳴る
+function transposed(){ return mode === 'melody' && tonicPc != null; }
+function shift(){ return transposed() ? (song && Number.isFinite(song.shift) ? song.shift : tonicPc) : 0; }
+function soundMidi(m){ return m + shift(); }
 function mkVoice(midi, when){
   const c = audio(); const f = freq(midi);
   const g = c.createGain(); g.gain.setValueAtTime(0, when); g.gain.linearRampToValueAtTime(0.35, when + 0.012); g.connect(master);
@@ -223,20 +221,20 @@ function buildPiano(){
   piano.style.width = (wi*WHITE_W) + 'px';
   relabel();
 }
-function degreeOf(m){ return ((m % 12) - tonicPc + 12) % 12; }
-function labelFor(m){ return tonicPc == null ? NOTE[m%12] : SOLF[degreeOf(m)]; }
+function degreeOf(m){ return m % 12; }   // 鍵盤は常に C＝ド の並び
+function labelFor(m){ return transposed() ? SOLF[degreeOf(m)] : NOTE[m%12]; }
 function relabel(){
   for (const el of piano.children) {
     const m = +el.dataset.midi, pc = m % 12;
     const lbl = el.querySelector('.lbl'), sub = el.querySelector('.sub');
     el.classList.remove('tonic');
-    if (tonicPc == null) {
+    if (!transposed()) {
       lbl.textContent = BLACK.has(pc) ? '' : NOTE[pc] + (pc === 0 ? Math.floor(m/12)-1 : '');
       sub.textContent = '';
     } else {
-      lbl.textContent = SOLF[degreeOf(m)];
-      sub.textContent = BLACK.has(pc) ? '' : NOTE[pc];
-      if (degreeOf(m) === 0) el.classList.add('tonic');
+      lbl.textContent = SOLF[pc];
+      sub.textContent = BLACK.has(pc) ? '' : NOTE[((pc + shift()) % 12 + 12) % 12];  // 実際に鳴る音
+      if (pc === 0) el.classList.add('tonic');
     }
   }
 }
@@ -277,15 +275,16 @@ piano.addEventListener('contextmenu', e => e.preventDefault());
 
 function onSwipeDown(midi){
   if (navigator.vibrate) navigator.vibrate(12);
-  if (mode === 'key' || tonicPc == null) { setKey(midi % 12); return; }
+  if (mode === 'key' || tonicPc == null) { setKey(midi); return; }
   insertText(SOLF[degreeOf(midi)]);
 }
 
 // ---------- キー ----------
-function setKey(pc){
-  tonicPc = pc; song.key = NOTE[pc]; mode = 'melody';
+function setKey(midi){
+  const pc = midi % 12;
+  tonicPc = pc; song.key = NOTE[pc]; song.shift = midi - 60; mode = 'melody';   // 見つけた音の高さがそのまま C4(ド) に来る
   relabel(); updateKeyUI(); persist();
-  scrollToMidi(60 + pc - 5, true);
+  scrollToMidi(55, true);   // ソ(G3)から表示、ド(C4)が左寄りに来る
   showNow('ド＝' + NOTE[pc]);
 }
 function updateKeyUI(){
@@ -293,12 +292,13 @@ function updateKeyUI(){
   else { keyBtn.textContent = 'キー ' + NOTE[tonicPc]; keyBtn.classList.remove('unset'); }
   hintEl.classList.toggle('keymode', mode === 'key');
   if (mode === 'key') hintEl.textContent = '① 曲の終わりの音を想像して鍵盤で探す → 見つけたら、その鍵盤を下にスワイプ';
-  else hintEl.textContent = `ド＝${NOTE[tonicPc]}　鍵盤を下にスワイプで追加。押している間は鳴り続けます`;
+  else hintEl.textContent = `ド＝${NOTE[tonicPc]} に移調中。鍵盤を下にスワイプで追加、押している間は鳴り続けます`;
 }
 keyBtn.addEventListener('click', () => {
   if (mode === 'key' && tonicPc != null) mode = 'melody';
   else { mode = 'key'; showNow(''); }
-  updateKeyUI();
+  relabel(); updateKeyUI();
+  scrollToMidi(mode === 'key' ? 60 : 55, true);
 });
 
 // ---------- 譜面(テキスト) ----------
@@ -349,7 +349,7 @@ function playAll(){
   const toks = tokenize(ta.value);
   if (!toks.length) { showNow('…'); return; }
   const c = audio();
-  const tb = 60 + (tonicPc ?? 0);
+  const tb = 60;   // 譜面は C＝ド で組み立て、鳴らすときに移調する
   let prev = null, t = c.currentTime + 0.06;
   const events = [];
   for (const tk of toks) {
@@ -409,7 +409,7 @@ function openSong(s){
   ta.setAttribute('inputmode','none'); $('btn-kbd').classList.remove('on');
   relabel(); updateKeyUI();
   screenList.classList.add('hidden'); screenEdit.classList.remove('hidden');
-  scrollToMidi(tonicPc == null ? 60 : 60 + tonicPc - 5, false);
+  scrollToMidi(tonicPc == null ? 60 : 55, false);
   save(LS_LAST, s.id);
   if (!s.title) titleEl.focus();
 }
@@ -497,16 +497,14 @@ $('btn-import').addEventListener('click', () => {
 });
 
 // メニュー
-$('btn-menu').addEventListener('click', () => { updateMenu(); $('dlg-menu').showModal(); });
+$('btn-menu').addEventListener('click', () => $('dlg-menu').showModal());
 $('m-close').addEventListener('click', () => $('dlg-menu').close());
 $('m-export').addEventListener('click', () => { $('dlg-menu').close(); persist(); showTextDialog({ title:'この曲を書き出し', readonly:true, text: songToText(song) }); });
 $('m-share').addEventListener('click', () => { $('dlg-menu').close(); persist(); copyText(shareUrl(song)); });
-$('m-transpose').addEventListener('click', () => { transpose = !transpose; save(LS_TRANS, transpose); updateMenu(); });
 $('m-delete').addEventListener('click', () => {
   if (!confirm(`「${song.title || '無題'}」を削除しますか？`)) return;
   $('dlg-menu').close(); songs = songs.filter(x => x !== song); song = null; save(LS_SONGS, songs); backToList();
 });
-function updateMenu(){ $('m-transpose').textContent = 'ド＝Cの高さで鳴らす：' + (transpose ? 'オン' : 'オフ'); }
 
 // 共有リンク
 function b64e(s){ return btoa(String.fromCharCode(...new TextEncoder().encode(s))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
