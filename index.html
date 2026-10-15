@@ -9,7 +9,7 @@
 <title>耳コピ図鑑</title>
 <style>
 :root{--bg:#15161c;--panel:#1f2129;--line:#2e313c;--fg:#e9e9ef;--mute:#8a8c99;--acc:#ffb84d;--acc2:#5ec4ff;--white:#f4f1ea;--black:#23242c}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;overscroll-behavior:none}
 #app{position:fixed;inset:0}
 .screen{position:absolute;inset:0;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
@@ -22,7 +22,9 @@ button.ghost{background:transparent;border-color:transparent;color:var(--mute)}
 button.primary{background:var(--acc);color:#1b1206;border-color:transparent;font-weight:600}
 button.danger{color:#ff7b7b}
 #title{flex:1;min-width:0;font:inherit;font-size:17px;background:transparent;border:0;border-bottom:1px solid var(--line);color:var(--fg);padding:6px 2px;outline:none}
-.keybadge{background:var(--panel);border-radius:999px;padding:6px 12px;font-weight:600;white-space:nowrap}
+.keybadge{background:var(--panel);border-radius:999px;padding:6px 12px;font-weight:600;white-space:nowrap;touch-action:none;user-select:none;-webkit-user-select:none;cursor:ns-resize;transition:transform .08s}
+.keybadge.drag{border-color:var(--acc2);color:var(--acc2)}
+.keybadge.tick{transform:scale(1.12)}
 .keybadge.unset{color:var(--acc);border-color:var(--acc)}
 .hint{padding:2px 14px 8px;font-size:13px;color:var(--mute);min-height:24px;line-height:1.4}
 .hint.keymode{color:var(--acc)}
@@ -300,14 +302,64 @@ function updateKeyUI(){
   else { keyBtn.textContent = 'キー ' + NOTE[tonicPc]; keyBtn.classList.remove('unset'); }
   hintEl.classList.toggle('keymode', mode === 'key');
   if (mode === 'key') hintEl.textContent = '① 曲の終わりの音を想像して鍵盤で探す → 見つけたら、その鍵盤を下にスワイプ';
-  else hintEl.textContent = `ド＝${NOTE[tonicPc]} に移調中。下にスワイプで追加。ド〜シは無印、上のオクターブは↑、下は↓`;
+  else hintEl.textContent = `ド＝${NOTE[tonicPc]} に移調中。下にスワイプで追加。「キー」を上下にスワイプで半音ずつ移調。ド〜シは無印、上は↑、下は↓`;
 }
-keyBtn.addEventListener('click', () => {
+keyBtn.addEventListener('click', e => {
+  if (keyDrag.swiped) { keyDrag.swiped = false; e.preventDefault(); return; }   // スワイプ直後のクリックは無視
   if (mode === 'key' && tonicPc != null) mode = 'melody';
   else { mode = 'key'; showNow(''); }
   relabel(); updateKeyUI();
   scrollToMidi(mode === 'key' ? 60 : 55, true);
 });
+
+// キーのバッジを上下にスワイプ → 半音ずつカチカチ移調（上で高く、下で低く）
+const TRANSPOSE_STEP_PX = 16, SHIFT_MIN = -24, SHIFT_MAX = 24;
+const keyDrag = { id: null, startY: 0, startShift: 0, steps: 0, swiped: false };
+function currentShift(){ return song && Number.isFinite(song.shift) ? song.shift : (tonicPc != null ? tonicPc : 0); }
+function applyShift(sh){
+  if (!song) return;
+  sh = Math.max(SHIFT_MIN, Math.min(SHIFT_MAX, sh));
+  song.shift = sh; tonicPc = ((sh % 12) + 12) % 12; song.key = NOTE[tonicPc]; mode = 'melody';
+  relabel(); updateKeyUI(); persist();
+}
+function tick(midi){   // カチッという音 ＋ 新しいドを短く鳴らす
+  const c = audio(), t = c.currentTime;
+  const o = c.createOscillator(), g = c.createGain();
+  o.type = 'square'; o.frequency.setValueAtTime(2400, t); o.frequency.exponentialRampToValueAtTime(600, t + 0.03);
+  g.gain.setValueAtTime(0.18, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.035);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.05);
+  scheduleNote(midi, t + 0.01, 0.13);
+  if (navigator.vibrate) navigator.vibrate(6);
+}
+keyBtn.addEventListener('pointerdown', e => {
+  if (!song) return;
+  e.preventDefault();
+  keyDrag.id = e.pointerId; keyDrag.startY = e.clientY; keyDrag.startShift = currentShift(); keyDrag.steps = 0; keyDrag.swiped = false;
+  try { keyBtn.setPointerCapture(e.pointerId); } catch(err){}
+});
+keyBtn.addEventListener('pointermove', e => {
+  if (e.pointerId !== keyDrag.id) return;
+  const steps = Math.round((keyDrag.startY - e.clientY) / TRANSPOSE_STEP_PX);   // 上にスワイプで＋
+  if (steps === keyDrag.steps) return;
+  if (!keyDrag.swiped) { keyDrag.swiped = true; keyBtn.classList.add('drag'); }
+  const before = currentShift();
+  keyDrag.steps = steps;
+  applyShift(keyDrag.startShift + steps);
+  const sh = currentShift();
+  if (sh !== before) {
+    tick(60 + sh);
+    keyBtn.classList.add('tick'); setTimeout(() => keyBtn.classList.remove('tick'), 80);
+    showNow((sh > before ? '♯ ' : '♭ ') + 'ド＝' + NOTE[tonicPc]);
+  }
+});
+function endKeyDrag(e){
+  if (e.pointerId !== keyDrag.id) return;
+  keyDrag.id = null; keyBtn.classList.remove('drag');
+  if (keyDrag.swiped) scrollToMidi(55, true);
+}
+keyBtn.addEventListener('pointerup', endKeyDrag);
+keyBtn.addEventListener('pointercancel', endKeyDrag);
+keyBtn.addEventListener('contextmenu', e => e.preventDefault());
 
 // ---------- 譜面(テキスト) ----------
 function insertText(str){
@@ -388,20 +440,23 @@ function playAll(){
 }
 function updatePlayBtn(){ $('btn-play').textContent = playing ? '♪ 再生中' : '▶ 再生'; }
 
-$('btn-play').addEventListener('click', playAll);
-$('btn-stop').addEventListener('click', stopAll);
-$('btn-space').addEventListener('click', () => insertText(' '));
-$('btn-newline').addEventListener('click', () => insertText('\n'));
-$('btn-bs').addEventListener('click', backspace);
+// 演奏系ボタンは押した瞬間に反応（連打しても取りこぼさない）。click は使わない
+function onPress(id, fn){
+  const el = $(id);
+  el.addEventListener('pointerdown', e => { e.preventDefault(); if (e.button === 0 || e.pointerType !== 'mouse') fn(); });
+  el.addEventListener('click', e => e.preventDefault());
+}
+onPress('btn-play', playAll);
+onPress('btn-stop', stopAll);
+onPress('btn-space', () => insertText(' '));
+onPress('btn-newline', () => insertText('\n'));
+onPress('btn-bs', backspace);
 $('btn-kbd').addEventListener('click', () => {
   const on = ta.getAttribute('inputmode') === 'none';
   ta.setAttribute('inputmode', on ? 'text' : 'none');
   $('btn-kbd').classList.toggle('on', on);
   if (on) { ta.focus(); } else { ta.blur(); }
 });
-for (const id of ['btn-play','btn-stop','btn-space','btn-newline','btn-bs']) {
-  $(id).addEventListener('pointerdown', e => e.preventDefault()); // テキストエリアのカーソルを保つ
-}
 ta.addEventListener('input', persist);
 titleEl.addEventListener('input', persist);
 titleEl.addEventListener('keydown', e => { if (e.key === 'Enter') titleEl.blur(); });
@@ -535,6 +590,19 @@ function importFromHash(){
 
 let toastTimer = 0;
 function toast(s){ const t = $('toast'); t.textContent = s; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1800); }
+
+// ---------- ズーム防止（iOS Safari は user-scalable=no を無視するので JS で止める） ----------
+let lastTouchEnd = 0;
+document.addEventListener('touchend', e => {
+  const t = e.target;
+  if (t.closest && (t.closest('dialog') || t === titleEl)) return;   // 文字入力欄はそのまま
+  const now = Date.now();
+  if (now - lastTouchEnd < 350) e.preventDefault();   // ダブルタップ拡大を抑止
+  lastTouchEnd = now;
+}, { passive: false });
+document.addEventListener('touchmove', e => { if (e.touches.length > 1 && !e.target.closest('dialog')) e.preventDefault(); }, { passive: false });   // ピンチ拡大を抑止
+document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+document.addEventListener('dblclick', e => { if (!e.target.closest('dialog') && e.target !== titleEl) e.preventDefault(); });
 
 // ---------- 起動 ----------
 buildPiano();
